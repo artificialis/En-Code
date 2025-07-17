@@ -1,2 +1,5 @@
-# En-Code
-Code des épisodes de la série "En Code"
+
+
+## License
+
+See the LICENSE file for details.
