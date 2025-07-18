@@ -24,6 +24,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from rich.console import Console
@@ -105,7 +107,7 @@ def get_data_loaders(batch_size, use_cuda=False):
     
     return train_loader, test_loader
 
-def train_epoch(model, device, train_loader, optimizer, criterion, epoch):
+def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progress=None):
     """
     Train the model for one epoch.
     
@@ -116,6 +118,7 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch):
         optimizer (torch.optim.Optimizer): Optimizer for updating model weights
         criterion (torch.nn.Module): Loss function
         epoch (int): Current epoch number (for progress display)
+        progress (Progress, optional): Existing Progress object to use instead of creating a new one
         
     Returns:
         float: Average training loss for the epoch
@@ -124,15 +127,24 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch):
     train_loss = 0
     total_batches = len(train_loader)
     
-    with Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        TextColumn("[bold]{task.fields[loss]:.6f}"),
-        TimeRemainingColumn(),
-    ) as progress:
-        batch_task = progress.add_task(f"[cyan]Epoch {epoch}", total=total_batches, loss=0.0)
-        
+    # Create a local progress display if none is provided
+    local_progress = progress is None
+    
+    if local_progress:
+        progress_obj = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("[bold]{task.fields[loss]:.6f}"),
+            TimeRemainingColumn(),
+        )
+        progress_obj.start()
+    else:
+        progress_obj = progress
+    
+    batch_task = progress_obj.add_task(f"[cyan]Epoch {epoch}", total=total_batches, loss=0.0)
+    
+    try:
         for data, _ in train_loader:
             data = data.to(device)
             
@@ -159,9 +171,12 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch):
             # Update metrics
             train_loss += loss.item()
             current_loss = loss.item()
-            progress.update(batch_task, advance=1, loss=current_loss)
+            progress_obj.update(batch_task, advance=1, loss=current_loss)
         # end for
-    # end with
+    finally:
+        # Only stop the progress if we created it locally
+        if local_progress:
+            progress_obj.stop()
     
     return train_loss / len(train_loader)
 
@@ -331,6 +346,7 @@ def main():
         console.print("[bold blue]Initializing Weights & Biases...[/bold blue]")
         wandb.init(**{k: v for k, v in wandb_config.items() if v is not None})
         console.print(f"[bold green]Weights & Biases initialized:[/bold green] [bold cyan]{wandb.run.name}[/bold cyan]")
+    # end if
     
     # Display experiment parameters
     console.print("\n[bold blue]Experiment Parameters:[/bold blue]")
@@ -399,7 +415,7 @@ def main():
         
         for epoch in range(1, config['training']['epochs'] + 1):
             # Train
-            train_loss = train_epoch(model, device, train_loader, optimizer, criterion, epoch)
+            train_loss = train_epoch(model, device, train_loader, optimizer, criterion, epoch, progress=progress)
             train_losses.append(train_loss)
             
             # Validate
@@ -499,6 +515,8 @@ def main():
     plt.close()
     
     console.print("[bold green]Training completed![/bold green]")
+# end main
 
 if __name__ == "__main__":
     main()
+# end if
