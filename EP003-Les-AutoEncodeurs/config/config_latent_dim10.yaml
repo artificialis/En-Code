@@ -2,22 +2,25 @@
 
 # Model architecture
 model:
-  hidden_dims: [512, 256, 128]  # Hidden layer dimensions for encoder (decoder will be symmetric)
-  latent_dim: 4                 # Dimension of latent space (2 or 3 for visualization)
+  model_type: model.Autoencoder    # Specify the model type
+  hidden_dims: [512, 256, 128]     # Hidden layer dimensions for encoder (decoder will be symmetric)
+  latent_dim: 10                   # Dimension of latent space (2 or 3 for visualization)
+  output_activation: torch.nn.Sigmoid
 
 # Training parameters
 training:
-  batch_size: 1024
+  criterion: torch.nn.BCELoss
+  batch_size: 128
   epochs: 500
   learning_rate: 0.001
   weight_decay: 0.0004
-  vis_frequency: 50              # Visualize reconstructions every N epochs
-  save_frequency: 50             # Save model checkpoint every N epochs
+  vis_frequency: 10              # Visualize reconstructions every N epochs
+  save_frequency: 10             # Save model checkpoint every N epochs
 
 # Paths for saving models and results
 paths:
-  model_dir: './models/latent_dim04'
-  results_dir: './results/latent_dim04'
+  model_dir: './models/latent_dim10'
+  results_dir: './results/latent_dim10'
 
 # Visualization parameters
 visualization:

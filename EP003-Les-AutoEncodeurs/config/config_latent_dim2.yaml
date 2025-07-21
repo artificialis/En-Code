@@ -16,8 +16,8 @@ training:
 
 # Paths for saving models and results
 paths:
-  model_dir: './models'
-  results_dir: './results'
+  model_dir: './models/latent_dim02'
+  results_dir: './results/latent_dim02'
 
 # Visualization parameters
 visualization:

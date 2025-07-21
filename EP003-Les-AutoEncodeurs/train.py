@@ -19,6 +19,7 @@ Example:
 import os
 import argparse
 import yaml
+import importlib
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,7 +36,7 @@ from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, T
 from rich.pretty import Pretty
 import wandb
 
-from model import Autoencoder
+from model import Autoencoder, ConvAutoEncoder
 
 # Initialize Rich console
 console = Console()
@@ -107,7 +108,7 @@ def get_data_loaders(batch_size, use_cuda=False):
     
     return train_loader, test_loader
 
-def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progress=None):
+def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, train_val_loss=None):
     """
     Train the model for one epoch.
     
@@ -118,7 +119,8 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progre
         optimizer (torch.optim.Optimizer): Optimizer for updating model weights
         criterion (torch.nn.Module): Loss function
         epoch (int): Current epoch number (for progress display)
-        progress (Progress, optional): Existing Progress object to use instead of creating a new one
+        total_epochs (int): Total number of epochs for training
+        train_val_loss (tuple, optional): Tuple containing (train_loss, val_loss) from previous epoch
         
     Returns:
         float: Average training loss for the epoch
@@ -127,22 +129,21 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progre
     train_loss = 0
     total_batches = len(train_loader)
     
-    # Create a local progress display if none is provided
-    local_progress = progress is None
+    # Create progress display for this epoch
+    progress_desc = f"[cyan]Epoch {epoch}/{total_epochs}"
+    if train_val_loss:
+        progress_desc += f" [green]Train: {train_val_loss[0]:.6f}[/green] [yellow]Val: {train_val_loss[1]:.6f}[/yellow]"
     
-    if local_progress:
-        progress_obj = Progress(
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("[bold]{task.fields[loss]:.6f}"),
-            TimeRemainingColumn(),
-        )
-        progress_obj.start()
-    else:
-        progress_obj = progress
+    progress_obj = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[bold]Batch Loss: {task.fields[loss]:.6f}"),
+        TimeRemainingColumn(),
+    )
+    progress_obj.start()
     
-    batch_task = progress_obj.add_task(f"[cyan]Epoch {epoch}", total=total_batches, loss=0.0)
+    batch_task = progress_obj.add_task(progress_desc, total=total_batches, loss=0.0)
     
     try:
         for data, _ in train_loader:
@@ -157,6 +158,11 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progre
             # Flatten the input if it's not already flattened
             if len(data.shape) > 2:
                 data = data.view(data.size(0), -1)
+            # end if
+            
+            # Flatten the output if it's not already flattened
+            if len(recon_batch.shape) > 2:
+                recon_batch = recon_batch.reshape(recon_batch.size(0), -1)
             # end if
             
             # Calculate loss
@@ -174,9 +180,7 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, progre
             progress_obj.update(batch_task, advance=1, loss=current_loss)
         # end for
     finally:
-        # Only stop the progress if we created it locally
-        if local_progress:
-            progress_obj.stop()
+        progress_obj.stop()
     
     return train_loss / len(train_loader)
 
@@ -206,6 +210,11 @@ def validate(model, device, test_loader, criterion):
             # Flatten the input if it's not already flattened
             if len(data.shape) > 2:
                 data = data.view(data.size(0), -1)
+            # end if
+            
+            # Flatten the output if it's not already flattened
+            if len(recon_batch.shape) > 2:
+                recon_batch = recon_batch.reshape(recon_batch.size(0), -1)
             # end if
             
             # Calculate loss
@@ -348,6 +357,12 @@ def main():
         console.print(f"[bold green]Weights & Biases initialized:[/bold green] [bold cyan]{wandb.run.name}[/bold cyan]")
     # end if
     
+    # Create data loaders
+    train_loader, test_loader = get_data_loaders(
+        batch_size=config['training']['batch_size'],
+        use_cuda=use_cuda
+    )
+    
     # Display experiment parameters
     console.print("\n[bold blue]Experiment Parameters:[/bold blue]")
     
@@ -355,8 +370,14 @@ def main():
     model_table = Table(title="Model Architecture")
     model_table.add_column("Parameter", style="cyan")
     model_table.add_column("Value", style="green")
-    model_table.add_row("Hidden Dimensions", str(config['model']['hidden_dims']))
+    model_type = config['model'].get('model_type', 'model.Autoencoder')
+    model_table.add_row("Model Type", str(model_type))
+    if 'hidden_dims' in config['model']:
+        model_table.add_row("Hidden Dimensions", str(config['model']['hidden_dims']))
+    if 'hidden_channels' in config['model']:
+        model_table.add_row("Hidden Channels", str(config['model']['hidden_channels']))
     model_table.add_row("Latent Dimension", str(config['model']['latent_dim']))
+    model_table.add_row("Output activation", str(config['model']['output_activation']))
     console.print(model_table)
     
     # Create a table for training parameters
@@ -369,27 +390,45 @@ def main():
     training_table.add_row("Weight Decay", str(config['training']['weight_decay']))
     training_table.add_row("Visualization Frequency", str(config['training']['vis_frequency']))
     training_table.add_row("Save Frequency", str(config['training']['save_frequency']))
+    training_table.add_row("Criterion", str(config['training']['criterion']))
     console.print(training_table)
-    
-    # Create data loaders
-    train_loader, test_loader = get_data_loaders(
-        batch_size=config['training']['batch_size'],
-        use_cuda=use_cuda
-    )
+
+    def load_class(full_class_path):
+        module_name, class_name = full_class_path.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+    # end load_class
     
     # Create model
-    model = Autoencoder(
-        input_dim=784,  # 28x28 MNIST images
-        hidden_dims=config['model']['hidden_dims'],
-        latent_dim=config['model']['latent_dim']
-    ).to(device)
+    model_class = load_class(model_type)
+    
+    # Initialize model based on its type
+    if model_class == Autoencoder:
+        model = model_class(
+            input_dim=784,  # 28x28 MNIST images
+            hidden_dims=config['model']['hidden_dims'],
+            latent_dim=config['model']['latent_dim'],
+            output_activation=config['model']['output_activation'],
+        ).to(device)
+    elif model_class == ConvAutoEncoder:
+        model = model_class(
+            input_channels=1,  # MNIST has 1 channel
+            input_size=28,     # MNIST images are 28x28
+            hidden_channels=config['model'].get('hidden_channels', [32, 64, 128]),
+            latent_dim=config['model']['latent_dim'],
+            output_activation=config['model']['output_activation'],
+        ).to(device)
+    else:
+        # For other model types, pass all config parameters
+        model = model_class(**config['model']).to(device)
     
     # Display model architecture
     console.print("\n[bold blue]Model Summary:[/bold blue]")
-    console.print(Panel(Pretty(model), title="Autoencoder Model"))
+    console.print(Panel(Pretty(model), title=f"{model_class.__name__} Model"))
     
     # Define loss function and optimizer
-    criterion = nn.MSELoss()
+    criterion_cls = load_class(config['training']['criterion'])
+    criterion = criterion_cls()
     optimizer = optim.Adam(
         model.parameters(),
         lr=config['training']['learning_rate'],
@@ -403,71 +442,68 @@ def main():
     # Training loop
     train_losses = []
     val_losses = []
+    total_epochs = config['training']['epochs']
+    prev_losses = None
     
-    # Create a progress bar for the entire training process
-    with Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        TimeRemainingColumn(),
-    ) as progress:
-        total_task = progress.add_task("[bold red]Total Training Progress", total=config['training']['epochs'])
+    for epoch in range(1, total_epochs + 1):
+        # Train
+        train_loss = train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, prev_losses)
+        train_losses.append(train_loss)
         
-        for epoch in range(1, config['training']['epochs'] + 1):
-            # Train
-            train_loss = train_epoch(model, device, train_loader, optimizer, criterion, epoch, progress=progress)
-            train_losses.append(train_loss)
+        # Validate
+        val_loss = validate(model, device, test_loader, criterion)
+        val_losses.append(val_loss)
+        
+        # Store losses for next epoch's progress bar
+        prev_losses = (train_loss, val_loss)
+        
+        # Print losses to console (without progress bar)
+        console.print(f'[bold]Epoch: {epoch}[/bold], [green]Train Loss: {train_loss:.6f}[/green], [yellow]Val Loss: {val_loss:.6f}[/yellow]')
+        
+        # Log metrics to wandb if enabled
+        if not args.no_wandb and 'wandb' in config and wandb.run is not None:
+            log_freq = config['wandb'].get('log_freq', 1)
+            if epoch % log_freq == 0:
+                wandb.log({
+                    'epoch': epoch,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                }, step=epoch)
+        
+        # Visualize reconstructions every few epochs
+        if epoch % config['training']['vis_frequency'] == 0:
+            console.print(f"[italic]Visualizing reconstructions for epoch {epoch}...[/italic]")
+            visualize_reconstruction(
+                model,
+                device,
+                test_loader,
+                epoch,
+                save_dir=config['paths']['results_dir'],
+                args=args, config=config
+            )
+        # end if
+        
+        # Save model checkpoint
+        if epoch % config['training']['save_frequency'] == 0:
+            console.print(f"[italic]Saving model checkpoint for epoch {epoch}...[/italic]")
+            checkpoint_path = f"{config['paths']['model_dir']}/autoencoder_epoch_{epoch}.pt"
+            torch.save(
+                model.state_dict(),
+                checkpoint_path
+            )
             
-            # Validate
-            val_loss = validate(model, device, test_loader, criterion)
-            val_losses.append(val_loss)
-            
-            # Update the total progress bar
-            progress.update(total_task, advance=1, description=f"[bold red]Total Progress - Epoch {epoch}/{config['training']['epochs']}")
-            
-            console.print(f'[bold]Epoch: {epoch}[/bold], [green]Train Loss: {train_loss:.6f}[/green], [yellow]Val Loss: {val_loss:.6f}[/yellow]')
-            
-            # Log metrics to wandb if enabled
-            if not args.no_wandb and 'wandb' in config and wandb.run is not None:
-                log_freq = config['wandb'].get('log_freq', 1)
-                if epoch % log_freq == 0:
-                    wandb.log({
-                        'epoch': epoch,
-                        'train_loss': train_loss,
-                        'val_loss': val_loss,
-                    }, step=epoch)
-            
-            # Visualize reconstructions every few epochs
-            if epoch % config['training']['vis_frequency'] == 0:
-                console.print(f"[italic]Visualizing reconstructions for epoch {epoch}...[/italic]")
-                visualize_reconstruction(
-                    model, device, test_loader, epoch,
-                    save_dir=config['paths']['results_dir'],
-                    args=args, config=config
+            # Log model checkpoint to wandb if enabled
+            if not args.no_wandb and 'wandb' in config and wandb.run is not None and config['wandb'].get('log_model', False):
+                artifact = wandb.Artifact(
+                    name=f"model-checkpoint-epoch-{epoch}",
+                    type="model",
+                    description=f"Model checkpoint at epoch {epoch}"
                 )
+                artifact.add_file(checkpoint_path)
+                wandb.log_artifact(artifact)
             # end if
-            
-            # Save model checkpoint
-            if epoch % config['training']['save_frequency'] == 0:
-                console.print(f"[italic]Saving model checkpoint for epoch {epoch}...[/italic]")
-                checkpoint_path = f"{config['paths']['model_dir']}/autoencoder_epoch_{epoch}.pt"
-                torch.save(
-                    model.state_dict(),
-                    checkpoint_path
-                )
-                
-                # Log model checkpoint to wandb if enabled
-                if not args.no_wandb and 'wandb' in config and wandb.run is not None and config['wandb'].get('log_model', False):
-                    artifact = wandb.Artifact(
-                        name=f"model-checkpoint-epoch-{epoch}",
-                        type="model",
-                        description=f"Model checkpoint at epoch {epoch}"
-                    )
-                    artifact.add_file(checkpoint_path)
-                    wandb.log_artifact(artifact)
-            # end if
-        # end for
-    # end with
+        # end if
+    # end for
     
     # Save the final model
     console.print("[bold green]Saving final model...[/bold green]")
@@ -486,6 +522,7 @@ def main():
         )
         artifact.add_file(final_model_path)
         wandb.log_artifact(artifact)
+    # end if
     
     # Plot loss curves
     console.print("[bold green]Plotting loss curves...[/bold green]")
@@ -511,7 +548,9 @@ def main():
             "final_val_loss": val_losses[-1],
             "best_val_loss": min(val_losses)
         })
-        
+    # end if
+
+    # Close
     plt.close()
     
     console.print("[bold green]Training completed![/bold green]")

@@ -1,0 +1,47 @@
+# Convolutional Autoencoder configuration for MNIST
+
+# Model architecture
+model:
+  model_type: model.ConvAutoEncoder  # Specify the model type
+  hidden_channels: [8, 16, 32]     # Hidden channel dimensions for encoder (decoder will be symmetric)
+  latent_dim: 10                     # Dimension of latent space
+  output_activation: torch.nn.Sigmoid
+
+# Training parameters
+training:
+  criterion: torch.nn.BCELoss
+  batch_size: 128
+  epochs: 500
+  learning_rate: 0.001
+  weight_decay: 0.0004
+  vis_frequency: 10                  # Visualize reconstructions every N epochs
+  save_frequency: 10                 # Save model checkpoint every N epochs
+
+# Paths for saving models and results
+paths:
+  model_dir: './models/conv_latent_dim10'
+  results_dir: './results/conv_latent_dim10'
+
+# Visualization parameters
+visualization:
+  perplexity: 30                    # For t-SNE if used
+  n_neighbors: 15                   # For UMAP if used
+  plot_type: '3d'                   # '2d' or '3d'
+  n_samples: 2000                   # Number of test samples to visualize
+  point_size: 5                     # Size of points in scatter plot
+  alpha: 0.7                        # Transparency of points
+  create_animation: true            # Whether to create a rotating animation for 3D plot
+  n_frames: 120                     # Number of frames for animation
+  fps: 30                           # Frames per second for animation
+  dpi: 100                          # DPI for saved images/animations
+
+# Weights & Biases (wandb) configuration
+wandb:
+  project: 'encode'                 # Project name in wandb
+  entity: null                      # Username or team name (null for default)
+  name: null                        # Run name (null for auto-generated)
+  tags: ['convautoencoder', 'mnist', 'en-code']  # Tags for the run
+  notes: 'Convolutional Autoencoder training on MNIST dataset'  # Notes for the run
+  mode: 'online'                    # 'online', 'offline', or 'disabled'
+  log_model: true                   # Whether to log model checkpoints
+  log_freq: 1                       # Log metrics every N epochs

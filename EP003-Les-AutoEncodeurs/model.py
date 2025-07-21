@@ -6,14 +6,25 @@ dimensions for the hidden layers and latent space. The autoencoder consists of a
 that compresses input data into a lower-dimensional latent space, and a decoder that
 reconstructs the original data from this latent representation.
 
-The implementation is designed for PyTorch and includes three main classes:
+The implementation is designed for PyTorch and includes the following main classes:
 - Encoder: Compresses input data into latent space
 - Decoder: Reconstructs data from latent space
 - Autoencoder: Combines encoder and decoder into a complete model
+- ConvAutoEncoder: Convolutional autoencoder that preserves spatial structure
 """
 
 import torch
 import torch.nn as nn
+import importlib
+import math
+
+
+def load_class(full_class_path):
+    module_name, class_name = full_class_path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
+# end load_class
+
 
 class Encoder(nn.Module):
     """
@@ -81,14 +92,21 @@ class Decoder(nn.Module):
     Attributes:
         decoder (nn.Sequential): Sequential container of decoder layers
     """
-    def __init__(self, latent_dim=2, hidden_dims=[128, 256, 512], output_dim=784):
+    def __init__(
+            self,
+            latent_dim=2,
+            hidden_dims=[128, 256, 512],
+            output_dim=784,
+            activation: str = "torch.nn.Sigmoid",
+    ):
         """
         Initialize the decoder network.
         
         Args:
             latent_dim (int): Dimension of the latent space (default: 2)
             hidden_dims (list): List of hidden layer dimensions (default: [128, 256, 512])
-            output_dim (int): Dimension of the output data (default: 784 for MNIST)
+            output_dim (int): Dimension of the output space (default: 784)
+            activation (str): Activation function (default: Sigmoid)
         """
         super(Decoder, self).__init__()
         
@@ -107,9 +125,13 @@ class Decoder(nn.Module):
         
         # Output layer
         layers.append(nn.Linear(hidden_dims[-1], output_dim))
-        layers.append(nn.Sigmoid())  # Sigmoid to get values between 0 and 1 for MNIST
+
+        # Output activation
+        activation_cls = load_class(activation)
+        layers.append(activation_cls())
         
         self.decoder = nn.Sequential(*layers)
+    # end __init__
     
     def forward(self, x):
         """
@@ -138,7 +160,13 @@ class Autoencoder(nn.Module):
         decoder (Decoder): The decoder component
         latent_dim (int): Dimension of the latent space
     """
-    def __init__(self, input_dim=784, hidden_dims=[512, 256, 128], latent_dim=2):
+    def __init__(
+            self,
+            input_dim=784,
+            hidden_dims=[512, 256, 128],
+            latent_dim=2,
+            output_activation: str = "torch.nn.Sigmoid",
+    ):
         """
         Initialize the autoencoder with encoder and decoder components.
         
@@ -146,14 +174,27 @@ class Autoencoder(nn.Module):
             input_dim (int): Dimension of the input data (default: 784 for MNIST)
             hidden_dims (list): List of hidden layer dimensions (default: [512, 256, 128])
             latent_dim (int): Dimension of the latent space (default: 2)
+            output_activation (nn.Module): Activation function
         """
         super(Autoencoder, self).__init__()
-        
-        self.encoder = Encoder(input_dim, hidden_dims, latent_dim)
-        # Reverse hidden_dims for decoder to create symmetric architecture
-        self.decoder = Decoder(latent_dim, list(reversed(hidden_dims)), input_dim)
-        
+
+        # Encodeur
+        self.encoder = Encoder(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            latent_dim=latent_dim
+        )
+
+        # Decodeur
+        self.decoder = Decoder(
+            latent_dim=latent_dim,
+            hidden_dims=list(reversed(hidden_dims)),
+            output_dim=input_dim,
+            activation=output_activation,
+        )
+
         self.latent_dim = latent_dim
+    # end __init__
     
     def forward(self, x):
         """
@@ -208,3 +249,197 @@ class Autoencoder(nn.Module):
             torch.Tensor: Reconstructed data of shape [batch_size, input_dim]
         """
         return self.decoder(z)
+
+
+class ConvAutoEncoder(nn.Module):
+    """
+    Convolutional autoencoder model for image data.
+    
+    This class implements an autoencoder using convolutional layers (Conv2d) in the encoder
+    and transposed convolutional layers (ConvTranspose2d) in the decoder. It preserves the
+    spatial structure of the input images throughout the network.
+    
+    The encoder compresses the input images into a lower-dimensional latent space, and the
+    decoder reconstructs the original images from this latent representation.
+    
+    Attributes:
+        encoder_conv (nn.Sequential): Sequential container of encoder convolutional layers
+        encoder_fc (nn.Sequential): Sequential container of encoder fully connected layers
+        decoder_fc (nn.Sequential): Sequential container of decoder fully connected layers
+        decoder_conv (nn.Sequential): Sequential container of decoder convolutional layers
+        latent_dim (int): Dimension of the latent space
+        input_channels (int): Number of input channels (1 for grayscale, 3 for RGB)
+    """
+    def __init__(
+            self,
+            input_channels=1,  # 1 for grayscale (MNIST), 3 for RGB
+            input_size=28,     # Input image size (28 for MNIST)
+            hidden_channels=[32, 64, 128],  # Number of channels in hidden layers
+            latent_dim=10,
+            output_activation: str = "torch.nn.Sigmoid",
+    ):
+        """
+        Initialize the convolutional autoencoder with encoder and decoder components.
+        
+        Args:
+            input_channels (int): Number of input channels (1 for grayscale, 3 for RGB)
+            input_size (int): Size of the input images (assuming square images)
+            hidden_channels (list): List of channel dimensions for hidden layers
+            latent_dim (int): Dimension of the latent space
+            output_activation (str): Activation function for the output layer
+        """
+        super(ConvAutoEncoder, self).__init__()
+        
+        self.input_channels = input_channels
+        self.input_size = input_size
+        self.latent_dim = latent_dim
+        self.hidden_channels = hidden_channels
+        
+        # Build encoder convolutional layers
+        encoder_layers = []
+        in_channels = input_channels
+        
+        for out_channels in hidden_channels:
+            encoder_layers.extend([
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            ])
+            in_channels = out_channels
+        
+        self.encoder_conv = nn.Sequential(*encoder_layers)
+        
+        # Create a dummy input to calculate the flattened dimension
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, input_channels, input_size, input_size)
+            dummy_output = self.encoder_conv(dummy_input)
+            _, C, H, W = dummy_output.shape
+            flattened_dim = C * H * W
+        
+        # Fully connected layers for latent space
+        self.encoder_fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flattened_dim, latent_dim)
+        )
+        
+        # Fully connected layers from latent space
+        self.decoder_fc = nn.Sequential(
+            nn.Linear(latent_dim, flattened_dim),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        
+        # Build decoder convolutional layers
+        decoder_layers = []
+        in_channels = hidden_channels[-1]
+        
+        # Reverse the hidden channels for the decoder
+        for out_channels in reversed(hidden_channels[:-1]):
+            decoder_layers.extend([
+                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            ])
+            in_channels = out_channels
+        
+        # Final layer to output the reconstructed image
+        decoder_layers.extend([
+            nn.ConvTranspose2d(in_channels, input_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
+        ])
+        
+        # Add output activation
+        activation_cls = load_class(output_activation)
+        decoder_layers.append(activation_cls())
+        
+        self.decoder_conv = nn.Sequential(*decoder_layers)
+        
+        # Store dimensions for reshaping in forward pass
+        self.feature_channels = C
+        self.feature_height = H
+        self.feature_width = W
+    
+    def forward(self, x):
+        """
+        Forward pass through the convolutional autoencoder.
+        
+        Args:
+            x (torch.Tensor): Input image tensor of shape [batch_size, channels, height, width]
+                              
+        Returns:
+            tuple: (reconstruction, latent)
+                - reconstruction (torch.Tensor): Reconstructed image of shape [batch_size, channels, height, width]
+                - latent (torch.Tensor): Latent space representation of shape [batch_size, latent_dim]
+        """
+        # Store original input shape for later cropping
+        self.original_height = x.size(2)
+        self.original_width = x.size(3)
+        
+        # Encode
+        latent = self.encode(x)
+        
+        # Decode with target dimensions matching the input
+        reconstruction = self.decode(latent, target_height=self.original_height, target_width=self.original_width)
+        
+        return reconstruction, latent
+    
+    def encode(self, x):
+        """
+        Encode input images to latent space.
+        
+        Args:
+            x (torch.Tensor): Input image tensor of shape [batch_size, channels, height, width]
+                              
+        Returns:
+            torch.Tensor: Latent space representation of shape [batch_size, latent_dim]
+        """
+        # Apply convolutional layers
+        x = self.encoder_conv(x)
+        
+        # Flatten and project to latent space
+        latent = self.encoder_fc(x)
+        
+        return latent
+    
+    def decode(self, z, target_height=None, target_width=None):
+        """
+        Decode from latent space to reconstructed images.
+        
+        Args:
+            z (torch.Tensor): Latent space representation of shape [batch_size, latent_dim]
+            target_height (int, optional): Target height for the output image. If None, uses self.original_height if available.
+            target_width (int, optional): Target width for the output image. If None, uses self.original_width if available.
+            
+        Returns:
+            torch.Tensor: Reconstructed image of shape [batch_size, channels, height, width]
+        """
+        # Project from latent space and reshape
+        batch_size = z.size(0)
+        x = self.decoder_fc(z)
+        x = x.view(batch_size, self.feature_channels, self.feature_height, self.feature_width)
+        
+        # Apply transposed convolutional layers
+        reconstruction = self.decoder_conv(x)
+        
+        # Use stored original dimensions if available and no target dimensions provided
+        if target_height is None and hasattr(self, 'original_height'):
+            target_height = self.original_height
+        if target_width is None and hasattr(self, 'original_width'):
+            target_width = self.original_width
+        
+        # Crop to match target dimensions if provided
+        if target_height is not None and target_width is not None:
+            if reconstruction.size(2) != target_height or reconstruction.size(3) != target_width:
+                # Calculate cropping boundaries
+                h_diff = reconstruction.size(2) - target_height
+                w_diff = reconstruction.size(3) - target_width
+                
+                # Ensure we can crop (output must be larger than target)
+                if h_diff >= 0 and w_diff >= 0:
+                    h_start = h_diff // 2
+                    w_start = w_diff // 2
+                    
+                    # Crop the reconstruction to match target dimensions
+                    reconstruction = reconstruction[:, :, 
+                                                h_start:h_start + target_height, 
+                                                w_start:w_start + target_width]
+        
+        return reconstruction
