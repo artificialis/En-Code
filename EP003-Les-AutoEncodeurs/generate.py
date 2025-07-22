@@ -6,6 +6,37 @@ Generate random images from a trained autoencoder model.
 This script loads a trained autoencoder model (safetensors + yaml config) and generates
 random images by sampling random latent vectors from a normal distribution with
 configurable mean and standard deviation, then passing them through the decoder.
+
+Usage:
+    python generate.py --model_path <path_to_safetensors_file> --config_path <path_to_yaml_config> 
+                      --output_dir <output_directory> [options]
+
+Required Arguments:
+    --model_path      Path to the model safetensors file
+    --config_path     Path to the model YAML config file
+    --output_dir      Output directory for generated images
+
+Optional Arguments:
+    --n_samples       Number of samples to generate (default: 10)
+    --mu              Mean of the normal distribution (default: 0.0)
+    --sigma           Standard deviation of the normal distribution (default: 1.0)
+    --grid            Create a grid image of all generated samples
+    --grid_rows       Number of rows in the grid (default: 5)
+    --grid_cols       Number of columns in the grid (default: 5)
+    --no-cuda         Disables CUDA even if available
+
+Examples:
+    # Generate 10 samples with default parameters
+    python generate.py --model_path models/autoencoder.safetensors --config_path models/autoencoder.yaml 
+                      --output_dir generated_images
+
+    # Generate 20 samples with custom distribution parameters and create a grid
+    python generate.py --model_path models/autoencoder.safetensors --config_path models/autoencoder.yaml 
+                      --output_dir generated_images --n_samples 20 --mu 0.5 --sigma 0.8 --grid
+
+    # Generate 15 samples and create a custom-sized grid
+    python generate.py --model_path models/autoencoder.safetensors --config_path models/autoencoder.yaml 
+                      --output_dir generated_images --n_samples 15 --grid --grid_rows 3 --grid_cols 5
 """
 
 import os
