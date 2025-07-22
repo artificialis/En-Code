@@ -35,8 +35,10 @@ from rich.panel import Panel
 from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.pretty import Pretty
 import wandb
+from safetensors.torch import save_file
 
 from model import Autoencoder, ConvAutoEncoder
+from visualization import visualize_reconstruction, visualize_latent, visualize_latent_2d
 
 # Initialize Rich console
 console = Console()
@@ -108,7 +110,7 @@ def get_data_loaders(batch_size, use_cuda=False):
     
     return train_loader, test_loader
 
-def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, train_val_loss=None):
+def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, train_val_loss=None, iteration=0, config=None, args=None, test_loader=None):
     """
     Train the model for one epoch.
     
@@ -121,9 +123,13 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
         epoch (int): Current epoch number (for progress display)
         total_epochs (int): Total number of epochs for training
         train_val_loss (tuple, optional): Tuple containing (train_loss, val_loss) from previous epoch
+        iteration (int, optional): Current global iteration counter
+        config (dict, optional): Configuration dictionary
+        args (argparse.Namespace, optional): Command line arguments
+        test_loader (DataLoader, optional): DataLoader for the test dataset (for visualization)
         
     Returns:
-        float: Average training loss for the epoch
+        tuple: (average_training_loss, updated_iteration_counter)
     """
     model.train()
     train_loss = 0
@@ -144,6 +150,11 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
     progress_obj.start()
     
     batch_task = progress_obj.add_task(progress_desc, total=total_batches, loss=0.0)
+    
+    # Get visualization parameters from config
+    vis_threshold_iter = config['training'].get('vis_threshold_iter', 0) if config else 0
+    vis_freq_before = config['training'].get('vis_freq_before', 0) if config else 0
+    vis_freq_after = config['training'].get('vis_freq_after', 0) if config else 0
     
     try:
         for data, _ in train_loader:
@@ -178,11 +189,98 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
             train_loss += loss.item()
             current_loss = loss.item()
             progress_obj.update(batch_task, advance=1, loss=current_loss)
+            
+            # Increment iteration counter
+            iteration += 1
+            
+            # Check if visualization should be done based on iteration
+            if config and test_loader and (
+                (vis_freq_before > 0 and iteration < vis_threshold_iter and iteration % vis_freq_before == 0) or
+                (vis_freq_after > 0 and iteration >= vis_threshold_iter and iteration % vis_freq_after == 0)
+            ):
+                console = Console()
+                console.print(f"[italic]Visualizing reconstructions for iteration {iteration}...[/italic]")
+                visualize_reconstruction(
+                    model,
+                    device,
+                    test_loader,
+                    iteration,  # Use iteration instead of epoch
+                    save_dir=config['paths']['results_dir'],
+                    args=args, config=config
+                )
+                
+                # Visualize latent space using t-SNE
+                console.print(f"[italic]Visualizing latent space for iteration {iteration}...[/italic]")
+                
+                # Set fixed random seed for reproducibility
+                torch.manual_seed(42)
+                np.random.seed(42)
+                
+                # Get a batch of test data
+                all_latents = []
+                all_digits = []
+                
+                # Number of samples to visualize
+                n_samples = 500
+                
+                model.eval()
+                with torch.no_grad():
+                    # Collect latent representations and corresponding digits
+                    for test_data, target in test_loader:
+                        test_data = test_data.to(device)
+                        
+                        # Get latent representations
+                        if hasattr(model, 'encode'):
+                            latent = model.encode(test_data)
+                        else:
+                            _, latent = model(test_data)
+                        
+                        all_latents.append(latent.cpu())
+                        all_digits.extend(target.tolist())
+                        
+                        if len(all_digits) >= n_samples:
+                            break
+                    
+                    # Concatenate all latents
+                    all_latents = torch.cat(all_latents, dim=0)
+                    
+                    # Select a fixed random subset
+                    if len(all_digits) > n_samples:
+                        indices = np.random.choice(len(all_digits), n_samples, replace=False)
+                        selected_latents = all_latents[indices]
+                        selected_digits = [all_digits[i] for i in indices]
+                    else:
+                        selected_latents = all_latents
+                        selected_digits = all_digits
+                    
+                    # Visualize latent space
+                    visualize_latent(
+                        selected_latents,
+                        selected_digits,
+                        iteration,  # Use iteration instead of epoch
+                        save_dir=config['paths']['results_dir'],
+                        args=args, config=config
+                    )
+                    
+                    # Visualize latent space with specific dimensions
+                    visualize_latent_2d(
+                        selected_latents,
+                        selected_digits,
+                        iteration,  # Use iteration instead of epoch
+                        dims=[0, 1],  # Use first two dimensions by default
+                        save_dir=config['paths']['results_dir'],
+                        args=args, config=config
+                    )
+                # end with
+                
+                # Set model back to training mode
+                model.train()
+            # end if
         # end for
     finally:
         progress_obj.stop()
     
-    return train_loss / len(train_loader)
+    return train_loss / len(train_loader), iteration
 
 def validate(model, device, test_loader, criterion):
     """
@@ -225,77 +323,6 @@ def validate(model, device, test_loader, criterion):
     
     return val_loss / len(test_loader)
 
-def visualize_reconstruction(model, device, test_loader, epoch, save_dir='./results', args=None, config=None):
-    """
-    Visualize original and reconstructed images from the test dataset.
-    
-    Creates a figure with original images in the top row and their
-    reconstructions in the bottom row, then saves it to disk.
-    If wandb is enabled, also logs the images to wandb.
-    
-    Args:
-        model (Autoencoder): The trained autoencoder model
-        device (torch.device): Device to use for inference (CPU or CUDA)
-        test_loader (DataLoader): DataLoader for the test dataset
-        epoch (int): Current epoch number (used in the saved filename)
-        save_dir (str): Directory to save the visualization images
-        args (argparse.Namespace, optional): Command line arguments
-        config (dict, optional): Configuration dictionary
-    """
-    os.makedirs(save_dir, exist_ok=True)
-    
-    model.eval()
-    with torch.no_grad():
-        # Get a batch of test data
-        data, _ = next(iter(test_loader))
-        data = data.to(device)
-        
-        # Reconstruct
-        recon_batch, _ = model(data)
-        
-        # Plot
-        n = min(8, data.size(0))
-        plt.figure(figsize=(12, 6))
-        
-        for i in range(n):
-            # Original images
-            ax = plt.subplot(2, n, i + 1)
-            plt.imshow(data[i].cpu().numpy().reshape(28, 28), cmap='gray')
-            plt.title("Original")
-            plt.axis('off')
-            
-            # Reconstructed images
-            ax = plt.subplot(2, n, i + 1 + n)
-            plt.imshow(recon_batch[i].cpu().numpy().reshape(28, 28), cmap='gray')
-            plt.title("Reconstructed")
-            plt.axis('off')
-        # end for
-        
-        plt.tight_layout()
-        fig_path = f"{save_dir}/reconstruction_epoch_{epoch}.png"
-        plt.savefig(fig_path)
-        
-        # Log to wandb if enabled
-        if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
-            wandb.log({
-                "reconstructions": wandb.Image(fig_path, caption=f"Epoch {epoch}")
-            }, step=epoch)
-            
-            # Also log individual images for better visualization
-            images = []
-            for i in range(min(4, n)):  # Limit to 4 pairs to avoid clutter
-                images.append(wandb.Image(
-                    data[i].cpu().numpy().reshape(28, 28),
-                    caption=f"Original {i+1}"
-                ))
-                images.append(wandb.Image(
-                    recon_batch[i].cpu().numpy().reshape(28, 28),
-                    caption=f"Reconstructed {i+1}"
-                ))
-            wandb.log({"samples": images}, step=epoch)
-            
-        plt.close()
-    # end with
 
 def main():
     """
@@ -445,9 +472,98 @@ def main():
     total_epochs = config['training']['epochs']
     prev_losses = None
     
+    # Initialize iteration counter
+    iteration = 0
+    
+    # Get visualization parameters from config
+    vis_threshold_iter = config['training'].get('vis_threshold_iter', 0)
+    vis_freq_before = config['training'].get('vis_freq_before', 0)
+    vis_freq_after = config['training'].get('vis_freq_after', 0)
+    
+    # Visualize at iteration 0 (before training starts)
+    if vis_freq_before > 0 or vis_freq_after > 0:
+        console.print("[italic]Visualizing reconstructions for iteration 0 (before training)...[/italic]")
+        visualize_reconstruction(
+            model,
+            device,
+            test_loader,
+            0,  # iteration 0
+            save_dir=config['paths']['results_dir'],
+            args=args, config=config
+        )
+        
+        # Visualize latent space using t-SNE
+        console.print("[italic]Visualizing latent space for iteration 0 (before training)...[/italic]")
+        
+        # Set fixed random seed for reproducibility
+        torch.manual_seed(42)
+        np.random.seed(42)
+        
+        # Get a batch of test data
+        all_latents = []
+        all_digits = []
+        
+        # Number of samples to visualize
+        n_samples = 500
+        
+        model.eval()
+        with torch.no_grad():
+            # Collect latent representations and corresponding digits
+            for data, target in test_loader:
+                data = data.to(device)
+                
+                # Get latent representations
+                if hasattr(model, 'encode'):
+                    latent = model.encode(data)
+                else:
+                    _, latent = model(data)
+                
+                all_latents.append(latent.cpu())
+                all_digits.extend(target.tolist())
+                
+                if len(all_digits) >= n_samples:
+                    break
+            
+            # Concatenate all latents
+            all_latents = torch.cat(all_latents, dim=0)
+            
+            # Select a fixed random subset
+            if len(all_digits) > n_samples:
+                indices = np.random.choice(len(all_digits), n_samples, replace=False)
+                selected_latents = all_latents[indices]
+                selected_digits = [all_digits[i] for i in indices]
+            else:
+                selected_latents = all_latents
+                selected_digits = all_digits
+            
+            # Visualize latent space
+            visualize_latent(
+                selected_latents,
+                selected_digits,
+                0,  # iteration 0
+                save_dir=config['paths']['results_dir'],
+                args=args, config=config
+            )
+            
+            # Visualize latent space with specific dimensions
+            visualize_latent_2d(
+                selected_latents,
+                selected_digits,
+                0,  # iteration 0
+                dims=[0, 1],  # Use first two dimensions by default
+                save_dir=config['paths']['results_dir'],
+                args=args, config=config
+            )
+        # end with
+    # end if
+    
     for epoch in range(1, total_epochs + 1):
-        # Train
-        train_loss = train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, prev_losses)
+        # Train (now returns updated iteration counter)
+        train_loss, iteration = train_epoch(
+            model, device, train_loader, optimizer, criterion, 
+            epoch, total_epochs, prev_losses, iteration, 
+            config, args, test_loader
+        )
         train_losses.append(train_loss)
         
         # Validate
@@ -458,7 +574,7 @@ def main():
         prev_losses = (train_loss, val_loss)
         
         # Print losses to console (without progress bar)
-        console.print(f'[bold]Epoch: {epoch}[/bold], [green]Train Loss: {train_loss:.6f}[/green], [yellow]Val Loss: {val_loss:.6f}[/yellow]')
+        console.print(f'[bold]Epoch: {epoch}[/bold], [green]Train Loss: {train_loss:.6f}[/green], [yellow]Val Loss: {val_loss:.6f}[/yellow], [blue]Iteration: {iteration}[/blue]')
         
         # Log metrics to wandb if enabled
         if not args.no_wandb and 'wandb' in config and wandb.run is not None:
@@ -468,29 +584,45 @@ def main():
                     'epoch': epoch,
                     'train_loss': train_loss,
                     'val_loss': val_loss,
+                    'iteration': iteration,
                 }, step=epoch)
-        
-        # Visualize reconstructions every few epochs
-        if epoch % config['training']['vis_frequency'] == 0:
-            console.print(f"[italic]Visualizing reconstructions for epoch {epoch}...[/italic]")
-            visualize_reconstruction(
-                model,
-                device,
-                test_loader,
-                epoch,
-                save_dir=config['paths']['results_dir'],
-                args=args, config=config
-            )
-        # end if
         
         # Save model checkpoint
         if epoch % config['training']['save_frequency'] == 0:
             console.print(f"[italic]Saving model checkpoint for epoch {epoch}...[/italic]")
-            checkpoint_path = f"{config['paths']['model_dir']}/autoencoder_epoch_{epoch}.pt"
-            torch.save(
-                model.state_dict(),
-                checkpoint_path
-            )
+            
+            # Save model in safetensors format
+            checkpoint_path = f"{config['paths']['model_dir']}/autoencoder_epoch_{epoch}.safetensors"
+            save_file(model.state_dict(), checkpoint_path)
+            
+            # Create YAML file with model parameters
+            yaml_path = f"{config['paths']['model_dir']}/autoencoder_epoch_{epoch}.yaml"
+            
+            # Extract model parameters
+            model_params = {}
+            model_params['model_type'] = model_class.__module__ + "." + model_class.__name__
+            
+            # Add model-specific parameters
+            if model_class == Autoencoder:
+                model_params['input_dim'] = 784  # 28x28 MNIST images
+                model_params['hidden_dims'] = config['model']['hidden_dims']
+                model_params['latent_dim'] = config['model']['latent_dim']
+                model_params['output_activation'] = config['model']['output_activation']
+            elif model_class == ConvAutoEncoder:
+                model_params['input_channels'] = 1  # MNIST has 1 channel
+                model_params['input_size'] = 28     # MNIST images are 28x28
+                model_params['hidden_channels'] = config['model'].get('hidden_channels', [32, 64, 128])
+                model_params['latent_dim'] = config['model']['latent_dim']
+                model_params['output_activation'] = config['model']['output_activation']
+            else:
+                # For other model types, include all config parameters
+                model_params.update(config['model'])
+            
+            # Save parameters to YAML file
+            with open(yaml_path, 'w') as yaml_file:
+                yaml.dump(model_params, yaml_file, default_flow_style=False)
+            
+            console.print(f"[italic]Saved model parameters to {yaml_path}[/italic]")
             
             # Log model checkpoint to wandb if enabled
             if not args.no_wandb and 'wandb' in config and wandb.run is not None and config['wandb'].get('log_model', False):
@@ -500,6 +632,7 @@ def main():
                     description=f"Model checkpoint at epoch {epoch}"
                 )
                 artifact.add_file(checkpoint_path)
+                artifact.add_file(yaml_path)
                 wandb.log_artifact(artifact)
             # end if
         # end if
@@ -507,11 +640,39 @@ def main():
     
     # Save the final model
     console.print("[bold green]Saving final model...[/bold green]")
-    final_model_path = f"{config['paths']['model_dir']}/autoencoder_final.pt"
-    torch.save(
-        model.state_dict(),
-        final_model_path
-    )
+    
+    # Save model in safetensors format
+    final_model_path = f"{config['paths']['model_dir']}/autoencoder_final.safetensors"
+    save_file(model.state_dict(), final_model_path)
+    
+    # Create YAML file with model parameters
+    yaml_path = f"{config['paths']['model_dir']}/autoencoder_final.yaml"
+    
+    # Extract model parameters
+    model_params = {}
+    model_params['model_type'] = model_class.__module__ + "." + model_class.__name__
+    
+    # Add model-specific parameters
+    if model_class == Autoencoder:
+        model_params['input_dim'] = 784  # 28x28 MNIST images
+        model_params['hidden_dims'] = config['model']['hidden_dims']
+        model_params['latent_dim'] = config['model']['latent_dim']
+        model_params['output_activation'] = config['model']['output_activation']
+    elif model_class == ConvAutoEncoder:
+        model_params['input_channels'] = 1  # MNIST has 1 channel
+        model_params['input_size'] = 28     # MNIST images are 28x28
+        model_params['hidden_channels'] = config['model'].get('hidden_channels', [32, 64, 128])
+        model_params['latent_dim'] = config['model']['latent_dim']
+        model_params['output_activation'] = config['model']['output_activation']
+    else:
+        # For other model types, include all config parameters
+        model_params.update(config['model'])
+    
+    # Save parameters to YAML file
+    with open(yaml_path, 'w') as yaml_file:
+        yaml.dump(model_params, yaml_file, default_flow_style=False)
+    
+    console.print(f"[italic]Saved model parameters to {yaml_path}[/italic]")
     
     # Log final model to wandb if enabled
     if not args.no_wandb and 'wandb' in config and wandb.run is not None and config['wandb'].get('log_model', False):
@@ -521,6 +682,7 @@ def main():
             description="Final trained model"
         )
         artifact.add_file(final_model_path)
+        artifact.add_file(yaml_path)
         wandb.log_artifact(artifact)
     # end if
     
