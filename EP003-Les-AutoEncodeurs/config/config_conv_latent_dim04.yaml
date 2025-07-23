@@ -9,13 +9,17 @@ model:
 
 # Training parameters
 training:
-  criterion: torch.nn.BCELoss
+  criterion: torch.nn.MSELoss
   batch_size: 128
   epochs: 500
   learning_rate: 0.001
   weight_decay: 0.0004
   vis_frequency: 10                  # Visualize reconstructions every N epochs
   save_frequency: 10                 # Save model checkpoint every N epochs
+  # Iteration-based visualization parameters
+  vis_threshold_iter: 4000      # Iteration threshold after which visualization frequency changes
+  vis_freq_before: 25          # Visualize every N iterations before threshold
+  vis_freq_after: 500           # Visualize every N iterations after threshold
 
 # Paths for saving models and results
 paths:

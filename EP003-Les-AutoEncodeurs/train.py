@@ -19,6 +19,7 @@ Example:
 import os
 import argparse
 import yaml
+import json
 import importlib
 import torch
 import torch.nn as nn
@@ -38,7 +39,12 @@ import wandb
 from safetensors.torch import save_file
 
 from model import Autoencoder, ConvAutoEncoder
-from visualization import visualize_reconstruction, visualize_latent, visualize_latent_2d
+from visualization import (
+    visualize_reconstruction,
+    visualize_latent,
+    visualize_latent_2d,
+    visualize_digit_reconstruction
+)
 
 # Initialize Rich console
 console = Console()
@@ -110,7 +116,20 @@ def get_data_loaders(batch_size, use_cuda=False):
     
     return train_loader, test_loader
 
-def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_epochs, train_val_loss=None, iteration=0, config=None, args=None, test_loader=None):
+def train_epoch(
+        model,
+        device,
+        train_loader,
+        optimizer,
+        criterion,
+        epoch,
+        total_epochs,
+        train_val_loss=None,
+        iteration=0,
+        config=None,
+        args=None,
+        test_loader=None
+):
     """
     Train the model for one epoch.
     
@@ -139,6 +158,7 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
     progress_desc = f"[cyan]Epoch {epoch}/{total_epochs}"
     if train_val_loss:
         progress_desc += f" [green]Train: {train_val_loss[0]:.6f}[/green] [yellow]Val: {train_val_loss[1]:.6f}[/yellow]"
+    # end if
     
     progress_obj = Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -155,8 +175,12 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
     vis_threshold_iter = config['training'].get('vis_threshold_iter', 0) if config else 0
     vis_freq_before = config['training'].get('vis_freq_before', 0) if config else 0
     vis_freq_after = config['training'].get('vis_freq_after', 0) if config else 0
+
+    # List of losses
+    loss_tracker = list()
     
     try:
+        # Iterate through training
         for data, _ in train_loader:
             data = data.to(device)
             
@@ -189,6 +213,9 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
             train_loss += loss.item()
             current_loss = loss.item()
             progress_obj.update(batch_task, advance=1, loss=current_loss)
+
+            # Add to tracker
+            loss_tracker.append({"epoch": epoch, "iteration": iteration, "loss": loss.item()})
             
             # Increment iteration counter
             iteration += 1
@@ -200,13 +227,24 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
             ):
                 console = Console()
                 console.print(f"[italic]Visualizing reconstructions for iteration {iteration}...[/italic]")
+
+                # Visualize reconstruction
                 visualize_reconstruction(
-                    model,
-                    device,
-                    test_loader,
-                    iteration,  # Use iteration instead of epoch
-                    save_dir=config['paths']['results_dir'],
-                    args=args, config=config
+                    model=model,
+                    device=device,
+                    test_loader=test_loader,
+                    step=iteration,  # Use iteration instead of epoch
+                    save_dir=config['paths']['results_dir']
+                )
+
+                # Save single digits reconstruction
+                visualize_digit_reconstruction(
+                    model=model,
+                    device=device,
+                    test_loader=test_loader,
+                    n_samples=8,
+                    step=iteration,
+                    save_dir=config['paths']['results_dir']
                 )
                 
                 # Visualize latent space using t-SNE
@@ -234,12 +272,15 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
                             latent = model.encode(test_data)
                         else:
                             _, latent = model(test_data)
+                        # end if
                         
                         all_latents.append(latent.cpu())
                         all_digits.extend(target.tolist())
                         
                         if len(all_digits) >= n_samples:
                             break
+                        # end if
+                    # end
                     
                     # Concatenate all latents
                     all_latents = torch.cat(all_latents, dim=0)
@@ -252,14 +293,14 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
                     else:
                         selected_latents = all_latents
                         selected_digits = all_digits
+                    # end if
                     
                     # Visualize latent space
                     visualize_latent(
-                        selected_latents,
-                        selected_digits,
-                        iteration,  # Use iteration instead of epoch
+                        latents=selected_latents,
+                        digits=selected_digits,
+                        step=iteration,  # Use iteration instead of epoch
                         save_dir=config['paths']['results_dir'],
-                        args=args, config=config
                     )
                     
                     # Visualize latent space with specific dimensions
@@ -279,8 +320,14 @@ def train_epoch(model, device, train_loader, optimizer, criterion, epoch, total_
         # end for
     finally:
         progress_obj.stop()
+    # end try
     
-    return train_loss / len(train_loader), iteration
+    return (
+        train_loss / len(train_loader),
+        loss_tracker,
+        iteration
+    )
+# end train_epoch
 
 def validate(model, device, test_loader, criterion):
     """
@@ -322,6 +369,7 @@ def validate(model, device, test_loader, criterion):
     # end with
     
     return val_loss / len(test_loader)
+# end validate
 
 
 def main():
@@ -404,7 +452,7 @@ def main():
     if 'hidden_channels' in config['model']:
         model_table.add_row("Hidden Channels", str(config['model']['hidden_channels']))
     model_table.add_row("Latent Dimension", str(config['model']['latent_dim']))
-    model_table.add_row("Output activation", str(config['model']['output_activation']))
+    model_table.add_row("Output activation", str(config['model'].get('output_activation', 'torch.nn.Sigmoid')))
     console.print(model_table)
     
     # Create a table for training parameters
@@ -417,7 +465,7 @@ def main():
     training_table.add_row("Weight Decay", str(config['training']['weight_decay']))
     training_table.add_row("Visualization Frequency", str(config['training']['vis_frequency']))
     training_table.add_row("Save Frequency", str(config['training']['save_frequency']))
-    training_table.add_row("Criterion", str(config['training']['criterion']))
+    training_table.add_row("Criterion", str(config['training'].get('criterion', 'torch.nn.MSELoss')))
     console.print(training_table)
 
     def load_class(full_class_path):
@@ -435,7 +483,7 @@ def main():
             input_dim=784,  # 28x28 MNIST images
             hidden_dims=config['model']['hidden_dims'],
             latent_dim=config['model']['latent_dim'],
-            output_activation=config['model']['output_activation'],
+            output_activation=config['model'].get('output_activation', 'torch.nn.Sigmoid'),
         ).to(device)
     elif model_class == ConvAutoEncoder:
         model = model_class(
@@ -443,7 +491,7 @@ def main():
             input_size=28,     # MNIST images are 28x28
             hidden_channels=config['model'].get('hidden_channels', [32, 64, 128]),
             latent_dim=config['model']['latent_dim'],
-            output_activation=config['model']['output_activation'],
+            output_activation=config['model'].get('output_activation', 'torch.nn.Sigmoid'),
         ).to(device)
     else:
         # For other model types, pass all config parameters
@@ -454,7 +502,7 @@ def main():
     console.print(Panel(Pretty(model), title=f"{model_class.__name__} Model"))
     
     # Define loss function and optimizer
-    criterion_cls = load_class(config['training']['criterion'])
+    criterion_cls = load_class(config['training'].get('criterion', 'torch.nn.MSELoss'))
     criterion = criterion_cls()
     optimizer = optim.Adam(
         model.parameters(),
@@ -482,14 +530,24 @@ def main():
     
     # Visualize at iteration 0 (before training starts)
     if vis_freq_before > 0 or vis_freq_after > 0:
+        # Visualize reconstruction
         console.print("[italic]Visualizing reconstructions for iteration 0 (before training)...[/italic]")
         visualize_reconstruction(
-            model,
-            device,
-            test_loader,
-            0,  # iteration 0
-            save_dir=config['paths']['results_dir'],
-            args=args, config=config
+            model=model,
+            device=device,
+            test_loader=test_loader,
+            step=0,  # iteration 0
+            save_dir=config['paths']['results_dir']
+        )
+
+        # Save single digits reconstruction
+        visualize_digit_reconstruction(
+            model=model,
+            device=device,
+            test_loader=test_loader,
+            n_samples=8,
+            step=0,
+            save_dir=config['paths']['results_dir']
         )
         
         # Visualize latent space using t-SNE
@@ -523,6 +581,8 @@ def main():
                 
                 if len(all_digits) >= n_samples:
                     break
+                # end if
+            # end for
             
             # Concatenate all latents
             all_latents = torch.cat(all_latents, dim=0)
@@ -535,6 +595,7 @@ def main():
             else:
                 selected_latents = all_latents
                 selected_digits = all_digits
+            # end if
             
             # Visualize latent space
             visualize_latent(
@@ -542,7 +603,6 @@ def main():
                 selected_digits,
                 0,  # iteration 0
                 save_dir=config['paths']['results_dir'],
-                args=args, config=config
             )
             
             # Visualize latent space with specific dimensions
@@ -556,19 +616,51 @@ def main():
             )
         # end with
     # end if
-    
+
+    loss_tracker = list()
+    val_loss_tracker = list()
     for epoch in range(1, total_epochs + 1):
         # Train (now returns updated iteration counter)
-        train_loss, iteration = train_epoch(
-            model, device, train_loader, optimizer, criterion, 
-            epoch, total_epochs, prev_losses, iteration, 
-            config, args, test_loader
+        train_loss, loss_track, iteration = train_epoch(
+            model=model,
+            device=device,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            criterion=criterion,
+            epoch=epoch,
+            total_epochs=total_epochs,
+            train_val_loss=prev_losses,
+            iteration=iteration,
+            config=config,
+            args=args,
+            test_loader=test_loader
         )
         train_losses.append(train_loss)
+        loss_tracker += loss_track
         
         # Validate
         val_loss = validate(model, device, test_loader, criterion)
         val_losses.append(val_loss)
+        val_loss_tracker.append({"epoch": epoch, "val_loss": val_loss})
+        
+        # Save training and validation losses to text files
+        train_loss_file_path = os.path.join(config['paths']['results_dir'], 'train_loss.json')
+        val_loss_file_path = os.path.join(config['paths']['results_dir'], 'val_loss.json')
+        
+        # Append current losses
+        with open(train_loss_file_path, 'a') as f:
+            json.dump(
+                obj={"train_losses": train_losses},
+                fp=f
+            )
+        # end with
+            
+        with open(val_loss_file_path, 'a') as f:
+            json.dump(
+                obj={"val_losses": val_losses},
+                fp=f
+            )
+        # end with
         
         # Store losses for next epoch's progress bar
         prev_losses = (train_loss, val_loss)
@@ -607,13 +699,13 @@ def main():
                 model_params['input_dim'] = 784  # 28x28 MNIST images
                 model_params['hidden_dims'] = config['model']['hidden_dims']
                 model_params['latent_dim'] = config['model']['latent_dim']
-                model_params['output_activation'] = config['model']['output_activation']
+                model_params['output_activation'] = config['model'].get('output_activation', 'torch.nn.Sigmoid')
             elif model_class == ConvAutoEncoder:
                 model_params['input_channels'] = 1  # MNIST has 1 channel
                 model_params['input_size'] = 28     # MNIST images are 28x28
                 model_params['hidden_channels'] = config['model'].get('hidden_channels', [32, 64, 128])
                 model_params['latent_dim'] = config['model']['latent_dim']
-                model_params['output_activation'] = config['model']['output_activation']
+                model_params['output_activation'] = config['model'].get('output_activation', 'sigmoid')
             else:
                 # For other model types, include all config parameters
                 model_params.update(config['model'])
@@ -657,13 +749,13 @@ def main():
         model_params['input_dim'] = 784  # 28x28 MNIST images
         model_params['hidden_dims'] = config['model']['hidden_dims']
         model_params['latent_dim'] = config['model']['latent_dim']
-        model_params['output_activation'] = config['model']['output_activation']
+        model_params['output_activation'] = config['model'].get('output_activation', 'sigmoid')
     elif model_class == ConvAutoEncoder:
         model_params['input_channels'] = 1  # MNIST has 1 channel
         model_params['input_size'] = 28     # MNIST images are 28x28
         model_params['hidden_channels'] = config['model'].get('hidden_channels', [32, 64, 128])
         model_params['latent_dim'] = config['model']['latent_dim']
-        model_params['output_activation'] = config['model']['output_activation']
+        model_params['output_activation'] = config['model'].get('output_activation', 'sigmoid')
     else:
         # For other model types, include all config parameters
         model_params.update(config['model'])

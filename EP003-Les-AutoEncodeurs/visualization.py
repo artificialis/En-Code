@@ -18,7 +18,80 @@ import wandb
 from sklearn.manifold import TSNE
 
 
-def visualize_reconstruction(model, device, test_loader, step, save_dir='./results', args=None, config=None):
+def visualize_digit_reconstruction(
+        model,
+        device,
+        test_loader,
+        n_samples: int,
+        step=0,
+        save_dir="./results"
+):
+    """
+    Visualize the results of the autoencoder model on digit at a time.
+
+    Args:
+        model (Autoencoder): The trained autoencoder model
+        device (torch.device): Device to use for inference (CPU or CUDA)
+        test_loader (DataLoader): DataLoader for the test dataset
+        n_samples (int): Number of samples to visualize
+        step (int): Current step number (iteration or epoch, used in the saved filename)
+        save_dir (str): Base directory where a 'reconstructions' subdirectory will be created to save the images
+    """
+    # Create main results directory
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Create specific subdirectory for reconstruction plots
+    reconstruction_dir = os.path.join(save_dir, "reconstructions")
+    os.makedirs(reconstruction_dir, exist_ok=True)
+
+    # Create specific subdirectory for this sample
+    for sample_i in range(n_samples):
+        sample_dir = os.path.join(reconstruction_dir, f"{sample_i}")
+        os.makedirs(sample_dir, exist_ok=True)
+    # end for
+
+    model.eval()
+    with torch.no_grad():
+        # Get a batch of test data
+        data, _ = next(iter(test_loader))
+        data = data.to(device)
+
+        # We have enough sampels
+        assert n_samples <= data.size(0)
+
+        # Reconstruct
+        recon_batch, _ = model(data)
+
+        for sample_i in range(n_samples):
+            # Reshape
+            digit_original = data[sample_i, ...].detach().cpu().numpy()
+            digit_reconstruction = recon_batch[sample_i].detach().cpu().numpy()
+
+            # Save original
+            plt.imsave(
+                f"{reconstruction_dir}/{sample_i}/original.png",
+                digit_original.reshape(28, 28),
+                cmap='gray'
+            )
+
+            # Save reconstruction
+            plt.imsave(
+                f"{reconstruction_dir}/{sample_i}/recon_{step:05d}.png",
+                digit_reconstruction.reshape(28, 28),
+                cmap='gray'
+            )
+        # end for
+    # end with
+# end visualize_digit_reconstruction
+
+
+def visualize_reconstruction(
+        model,
+        device,
+        test_loader,
+        step,
+        save_dir='./results'
+):
     """
     Visualize original and reconstructed images from the test dataset.
     
@@ -32,8 +105,6 @@ def visualize_reconstruction(model, device, test_loader, step, save_dir='./resul
         test_loader (DataLoader): DataLoader for the test dataset
         step (int): Current step number (iteration or epoch, used in the saved filename)
         save_dir (str): Base directory where a 'reconstructions' subdirectory will be created to save the images
-        args (argparse.Namespace, optional): Command line arguments
-        config (dict, optional): Configuration dictionary
     """
     # Create main results directory
     os.makedirs(save_dir, exist_ok=True)
@@ -72,33 +143,18 @@ def visualize_reconstruction(model, device, test_loader, step, save_dir='./resul
         plt.tight_layout()
         fig_path = f"{reconstruction_dir}/reconstruction_iter_{step}.png"
         plt.savefig(fig_path)
-        
-        # Log to wandb if enabled
-        if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
-            wandb.log({
-                "reconstructions": wandb.Image(fig_path, caption=f"Iteration {step}")
-            }, step=step)
-            
-            # Also log individual images for better visualization
-            images = []
-            for i in range(min(4, n)):  # Limit to 4 pairs to avoid clutter
-                images.append(wandb.Image(
-                    data[i].cpu().numpy().reshape(28, 28),
-                    caption=f"Original {i+1}"
-                ))
-                images.append(wandb.Image(
-                    recon_batch[i].cpu().numpy().reshape(28, 28),
-                    caption=f"Reconstructed {i+1}"
-                ))
-            # end for
-            wandb.log({"samples": images}, step=step)
-        # end if
+
         plt.close()
     # end with
 # end visualize_reconstruction
 
 
-def visualize_latent(latents, digits, step, save_dir='./results', args=None, config=None):
+def visualize_latent(
+        latents,
+        digits,
+        step,
+        save_dir='./results'
+):
     """
     Visualize the latent space using t-SNE projection.
     
@@ -110,8 +166,6 @@ def visualize_latent(latents, digits, step, save_dir='./results', args=None, con
         digits (list): List of n numbers representing the digit of each latent representation
         step (int): Current step number (iteration or epoch, used in the saved filename)
         save_dir (str): Base directory where a 'latent_tsne' subdirectory will be created to save the images
-        args (argparse.Namespace, optional): Command line arguments
-        config (dict, optional): Configuration dictionary
     """
     # Create main results directory
     os.makedirs(save_dir, exist_ok=True)
@@ -137,17 +191,19 @@ def visualize_latent(latents, digits, step, save_dir='./results', args=None, con
     plt.title(f'Latent Space Visualization (t-SNE) - Iteration {step}')
     plt.xlabel('t-SNE Dimension 1')
     plt.ylabel('t-SNE Dimension 2')
+    plt.ylim(-35, 35)
+    plt.xlim(-35, 35)
     
     # Save the figure
     fig_path = f"{latent_tsne_dir}/latent_tsne_iter_{step}.png"
     plt.savefig(fig_path)
     
     # Log to wandb if enabled
-    if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
-        wandb.log({
-            "latent_space": wandb.Image(fig_path, caption=f"Latent Space (t-SNE) - Iteration {step}")
-        }, step=step)
-    # end if
+    # if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
+    #     wandb.log({
+    #         "latent_space": wandb.Image(fig_path, caption=f"Latent Space (t-SNE) - Iteration {step}")
+    #     }, step=step)
+    # # end if
     
     plt.close()
 # end visualize_latent
@@ -193,17 +249,19 @@ def visualize_latent_2d(latents, digits, step, dims=[0, 1], save_dir='./results'
     plt.title(f'Latent Space Visualization (Dims {dim1},{dim2}) - Iteration {step}')
     plt.xlabel(f'Latent Dimension {dim1}')
     plt.ylabel(f'Latent Dimension {dim2}')
+    plt.ylim(-2.0, 2.0)
+    plt.xlim(-1.0, 3.5)
     
     # Save the figure
     fig_path = f"{latent_2d_dir}/latent_dims_{dim1}_{dim2}_iter_{step}.png"
     plt.savefig(fig_path)
     
     # Log to wandb if enabled
-    if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
-        wandb.log({
-            f"latent_space_dims_{dim1}_{dim2}": wandb.Image(fig_path, caption=f"Latent Space (Dims {dim1},{dim2}) - Iteration {step}")
-        }, step=step)
-    # end if
+    # if args and config and not args.no_wandb and 'wandb' in config and wandb.run is not None:
+    #     wandb.log({
+    #         f"latent_space_dims_{dim1}_{dim2}": wandb.Image(fig_path, caption=f"Latent Space (Dims {dim1},{dim2}) - Iteration {step}")
+    #     }, step=step)
+    # # end if
     
     plt.close()
 # end visualize_latent_2d
