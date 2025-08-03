@@ -43,7 +43,8 @@ from visualization import (
     visualize_reconstruction,
     visualize_latent,
     visualize_latent_2d,
-    visualize_digit_reconstruction
+    visualize_digit_reconstruction,
+    visualize_training_mse
 )
 
 # Initialize Rich console
@@ -128,7 +129,9 @@ def train_epoch(
         iteration=0,
         config=None,
         args=None,
-        test_loader=None
+        test_loader=None,
+        loss_tracker=None,
+        val_loss_tracker=None
 ):
     """
     Train the model for one epoch.
@@ -146,6 +149,8 @@ def train_epoch(
         config (dict, optional): Configuration dictionary
         args (argparse.Namespace, optional): Command line arguments
         test_loader (DataLoader, optional): DataLoader for the test dataset (for visualization)
+        loss_tracker (list, optional): List of dictionaries containing loss tracking data across all epochs
+        val_loss_tracker (list, optional): List of dictionaries containing validation loss tracking data
         
     Returns:
         tuple: (average_training_loss, updated_iteration_counter)
@@ -177,7 +182,8 @@ def train_epoch(
     vis_freq_after = config['training'].get('vis_freq_after', 0) if config else 0
 
     # List of losses
-    loss_tracker = list()
+    if loss_tracker is None:
+        loss_tracker = list()
     
     try:
         # Iterate through training
@@ -314,6 +320,16 @@ def train_epoch(
                     )
                 # end with
                 
+                # Visualize MSE (training and validation)
+                console.print(f"[italic]Visualizing MSE for iteration {iteration}...[/italic]")
+                visualize_training_mse(
+                    loss_tracker=loss_tracker,
+                    step=iteration,
+                    save_dir=config['paths']['results_dir'],
+                    max_iterations=config['training']['epochs'] * len(train_loader),  # Estimate total iterations
+                    val_loss_tracker=val_loss_tracker
+                )
+                
                 # Set model back to training mode
                 model.train()
             # end if
@@ -324,7 +340,7 @@ def train_epoch(
     
     return (
         train_loss / len(train_loader),
-        loss_tracker,
+        loss_tracker,  # Return the same loss_tracker that was passed in and updated
         iteration
     )
 # end train_epoch
@@ -615,13 +631,26 @@ def main():
                 args=args, config=config
             )
         # end with
+        
+        # Initialize loss_tracker with a placeholder entry for iteration 0
+        loss_tracker = [{"epoch": 0, "iteration": 0, "loss": 0.0}]
+        
+        # Initialize val_loss_tracker (empty at this point)
+        val_loss_tracker = list()
+        
+        # Visualize initial MSE plot (empty at this point)
+        console.print("[italic]Visualizing initial MSE plot...[/italic]")
+        visualize_training_mse(
+            loss_tracker=loss_tracker,
+            step=0,
+            save_dir=config['paths']['results_dir'],
+            max_iterations=config['training']['epochs'] * len(train_loader),  # Estimate total iterations
+            val_loss_tracker=val_loss_tracker
+        )
     # end if
-
-    loss_tracker = list()
-    val_loss_tracker = list()
     for epoch in range(1, total_epochs + 1):
         # Train (now returns updated iteration counter)
-        train_loss, loss_track, iteration = train_epoch(
+        train_loss, epoch_loss_tracker, iteration = train_epoch(
             model=model,
             device=device,
             train_loader=train_loader,
@@ -633,10 +662,11 @@ def main():
             iteration=iteration,
             config=config,
             args=args,
-            test_loader=test_loader
+            test_loader=test_loader,
+            loss_tracker=loss_tracker,
+            val_loss_tracker=val_loss_tracker
         )
         train_losses.append(train_loss)
-        loss_tracker += loss_track
         
         # Validate
         val_loss = validate(model, device, test_loader, criterion)

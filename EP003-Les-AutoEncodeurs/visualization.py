@@ -265,3 +265,112 @@ def visualize_latent_2d(latents, digits, step, dims=[0, 1], save_dir='./results'
     
     plt.close()
 # end visualize_latent_2d
+
+
+def visualize_training_mse(loss_tracker, step, save_dir='./results', max_iterations=None, val_loss_tracker=None):
+    """
+    Visualize the training MSE over iterations.
+    
+    Creates a plot of the training MSE over iterations with a transparent background,
+    white grid, axes, title, and ticks. The plot is saved with a consistent scale
+    to create a stable animation.
+    
+    Args:
+        loss_tracker (list): List of dictionaries containing 'iteration' and 'loss' values
+        step (int): Current iteration number (used in the saved filename)
+        save_dir (str): Base directory where a 'training_mse' subdirectory will be created to save the images
+        max_iterations (int, optional): Maximum number of iterations to show on x-axis (for stable animation)
+        val_loss_tracker (list, optional): List of dictionaries containing 'epoch' and 'val_loss' values
+    """
+    # Create main results directory
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Create specific subdirectory for training MSE plots
+    mse_dir = os.path.join(save_dir, "training_mse")
+    os.makedirs(mse_dir, exist_ok=True)
+    
+    # Extract iterations and losses
+    iterations = [entry['iteration'] for entry in loss_tracker]
+    losses = [entry['loss'] for entry in loss_tracker]
+    
+    # Create figure with transparent background
+    fig = plt.figure(figsize=(10, 6), facecolor='none')
+    ax = fig.add_subplot(111)
+    
+    # Set background to transparent
+    ax.patch.set_alpha(0.0)
+
+    # Plot the training MSE curve
+    ax.plot(iterations[1:], losses[1:], '-', linewidth=2.0, color="yellow", label="Training")
+    
+    # Plot validation MSE if provided
+    if val_loss_tracker is not None and len(val_loss_tracker) > 0:
+        # Extract validation epochs and losses
+        val_epochs = [entry['epoch'] for entry in val_loss_tracker]
+        val_losses = [entry['val_loss'] for entry in val_loss_tracker]
+        
+        # Map epochs to iterations for plotting on the same scale
+        # We'll use the last iteration of each epoch as the x-coordinate
+        # since validation is performed at the end of each epoch
+        epoch_to_iteration = {}
+        for entry in loss_tracker:
+            # Always update with the latest iteration for each epoch
+            epoch_to_iteration[entry['epoch']] = entry['iteration']
+        
+        # Filter out any validation epochs that don't have a corresponding training iteration
+        valid_indices = []
+        valid_val_iterations = []
+        valid_val_losses = []
+        
+        for i, epoch in enumerate(val_epochs):
+            iteration = epoch_to_iteration.get(epoch)
+            if iteration is not None and iteration > 0:
+                valid_indices.append(i)
+                valid_val_iterations.append(iteration)
+                valid_val_losses.append(val_losses[i])
+        
+        # Plot validation curve in bright purple if we have valid data
+        if valid_val_iterations and valid_val_losses:
+            ax.plot(valid_val_iterations, valid_val_losses, '-', linewidth=2.0, color="#FF00FF", label="Validation")
+    
+    # Set white grid, axes, title, and ticks
+    ax.grid(True, color='white', linestyle='-', linewidth=1.2, alpha=0.7)
+    ax.set_title(f'MSE Loss - Iteration {step}', color='white')
+    ax.set_xlabel('Iteration', color='white')
+    ax.set_ylabel('MSE Loss', color='white')
+    
+    # Always add legend with both training and validation entries
+    #legend = ax.legend(loc='upper right')
+    #for text in legend.get_texts():
+    #    text.set_color('white')
+    
+    # Set tick colors to white
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    
+    # Set spine colors to white
+    for spine in ax.spines.values():
+        spine.set_color('white')
+    
+    # Set fixed limits for stable animation
+    if max_iterations is not None:
+        # ax.set_xlim(0, max_iterations)
+        ax.set_xlim(-100, 10000)
+    else:
+        # If max_iterations not provided, use a reasonable buffer
+        ax.set_xlim(-100, max(iterations[-1] * 1.1, 100))
+    # end if
+    
+    # Set y-axis limits with a reasonable buffer
+    max_loss = max(losses) if losses else 1.0
+    min_loss = min(losses) if losses else 0.0
+    buffer = (max_loss - min_loss) * 0.1 if max_loss > min_loss else 0.1
+    # ax.set_ylim(max(0, min_loss - buffer), max_loss + buffer)
+    ax.set_ylim(0, 0.3)
+    
+    # Save the figure with transparent background
+    fig_path = f"{mse_dir}/training_mse_iter_{step:06d}.png"
+    plt.savefig(fig_path, transparent=True, bbox_inches='tight')
+    
+    plt.close()
+# end visualize_training_mse

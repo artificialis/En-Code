@@ -4,7 +4,7 @@
 model:
   model_type: model.ConvAutoEncoder  # Specify the model type
   hidden_channels: [8, 16, 32]     # Hidden channel dimensions for encoder (decoder will be symmetric)
-  latent_dim: 10                     # Dimension of latent space
+  latent_dim: 1                     # Dimension of latent space
   output_activation: torch.nn.Sigmoid
 
 # Training parameters
@@ -23,8 +23,8 @@ training:
 
 # Paths for saving models and results
 paths:
-  model_dir: './models/conv_latent_dim10'
-  results_dir: './results/conv_latent_dim10'
+  model_dir: './models/conv_latent_dim01'
+  results_dir: './results/conv_latent_dim01'
 
 # Visualization parameters
 visualization:
